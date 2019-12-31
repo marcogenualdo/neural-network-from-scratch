@@ -1,7 +1,7 @@
 import numpy as np
 import struct as st
 from random import shuffle 
-from ../mnist.load_mnist import load_all
+from load_mnist import load_all
 
 import json
 from matplotlib import pyplot as plt
@@ -116,8 +116,9 @@ class Brain:
     def update_metrics (self, metrics, predict, lbl, gradW, gradb):
         metrics['batch_loss'].append(C(sigma(predict[-1]), lbl))
         metrics['loss'] += metrics['batch_loss'][-1]
-        metrics['update_ratio'].append(sum([dw.sum() + db.sum() for dw, db in zip(gradW,gradb)]) 
-                                              / sum([w.sum() + b.sum() for w,b in zip(self.wMat, self.bias)]))
+        metrics['update_ratio'].append(
+            sum([dw.sum() + db.sum() for dw, db in zip(gradW,gradb)]) 
+            / sum([w.sum() + b.sum() for w,b in zip(self.wMat, self.bias)]))
         
 
 
@@ -181,9 +182,15 @@ def plot_metrics (metrics, epoch_metrics, fig):
     ax_batch = fig.add_subplot(211)
     ax_update = fig.add_subplot(224)
 
+    plt.subplots_adjust(hspace=0.3)
+
     ax_loss.plot(epochs, metrics['loss'])
     ax_batch.plot(batches, metrics['batch_loss'])
     ax_update.plot(epoch_batches, metrics['update_ratio'])
+
+    ax_loss.title.set_text('Epoch Loss')
+    ax_batch.title.set_text('Batch Loss')
+    ax_update.title.set_text('Gradient / Weight ratio')
 
     plt.draw()
     plt.pause(0.001)
