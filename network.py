@@ -1,7 +1,10 @@
 import numpy as np
 import struct as st
 from random import shuffle 
+from ../mnist.load_mnist import load_all
+
 import json
+from matplotlib import pyplot as plt
 
 
 class Brain:
@@ -12,13 +15,17 @@ class Brain:
         self.bias = biases
 
             
-    def read (self,v0):
-        result = [v0] #result[k] = v[k] = W[k-1]*sigma(v[k-1])+b[k-1]
-        appo = v0 #appo = sigma(result[k]) = sigma(v[k]) 
-        
-        for k in range(self.nLayers):
-            result.append(self.wMat[k].dot(appo) + self.bias[k])
-            appo = sigma(result[k+1])
+    def read (self, v0):
+        # result[k] = v[k] = W[k-1]*sigma(v[k-1])+b[k-1]
+        # just the affine transformation, useful for gradients
+        result = [v0] 
+        # appo = sigma(result[k]) = sigma(v[k])
+        appo = v0 
+     
+        for w,b in zip(self.wMat, self.bias):
+            result.append(np.dot(appo, w.T) 
+                          + np.tile(b, (v0.shape[0],1)))
+            appo = sigma(result[-1])
         return result
 
     
@@ -28,52 +35,60 @@ class Brain:
         return np.argmax(x)
 
         
-    def SGD_training (self, data, eta = 0.5, size_batch = 10, 
-            regularize = 0, gamma = 0.5):
-        #initializing gradients
-        avg_dW = [np.zeros(np.shape(it)) for it in self.wMat]
-        avg_db = [np.zeros(len(it)) for it in self.bias]
+    def SGD_training (self, 
+                      samples, labels, 
+                      eta = 0.5,
+                      mu = 0.5,
+                      batch_size = 10, 
+                      regularize = 0, 
+                      gamma = 0.5,
+                     ):
 
-        #training
-        len_data = len(data)
-        cost = 0
-        for i in range(len_data):
-            #computing gradients
-            result = self.read (data[i][0])
-            dW, db = self.gradErr (result, data[i][1]) 
-            cost += C(sigma(result[-1]), data[i][1])
+        metrics = self.init_metrics()
 
-            #adding to gradients' averages
-            for j in range(self.nLayers):
-                avg_dW[j] += dW[j]
-                avg_db[j] += db[j]
+        # splitting training data into batches
+        indices = [k for k in range(batch_size, labels.shape[0], batch_size)]
+        sample_batches = np.split(samples, indices)
+        label_batches = np.split(labels, indices)
 
-            if i % size_batch == 0 and i > 1:
-                for j in range(self.nLayers):
-                    #regularizing if requested
-                    if regularize == 1:
-                        self.wMat[j] -= eta * gamma / len_data * np.sign (self.wMat[j])
-                    if regularize == 2:
-                        self.wMat[j] *= 1 - eta * gamma / len_data 
-                    
-                    #computing new weights and biases
-                    self.wMat[j] -= (eta / size_batch) * avg_dW[j]
-                    self.bias[j] -= (eta / size_batch) * avg_db[j]
-
-                    avg_dW[j] = np.zeros(np.shape(self.wMat[j]))
-                    avg_db[j] = np.zeros(np.shape(self.bias[j]))
+        # inintializing
+        wSpeed = [np.zeros(np.shape(it)) for it in self.wMat]
+        bSpeed = [np.zeros(len(it)) for it in self.bias]
         
-        return cost / len_data
-       
+        # training
+        for batch, label_batch in zip(sample_batches, label_batches):
+            # computing gradients
+            result = self.read (batch)
+            dW, db = self.gradErr(result, label_batch) 
+
+            # adding to gradients' averages
+            for j in range(self.nLayers):
+                # computing new weights and biases with momentum
+                wSpeed[j] = mu * wSpeed[j] - eta * np.mean(dW[j], axis=0)
+                bSpeed[j] = mu * bSpeed[j] - eta * np.mean(db[j], axis=0)
+
+                self.wMat[j] += wSpeed[j]
+                self.bias[j] += bSpeed[j]
+
+                # regularizing if requested
+                if regularize == 1:
+                    self.wMat[j] -= eta * gamma / len_data * np.sign(self.wMat[j])
+                if regularize == 2:
+                    self.wMat[j] *= 1 - eta * gamma / len_data 
+
+            self.update_metrics(metrics, result, label_batch, dW, db)
+        return metrics
+      
 
     def gradErr (self, v, sol):
-        dE = dC(sigma(v[-1]),sol) #* dsigma(v[-1])
-        Wgrad = [np.tensordot (dE,sigma(v[-2]), axes=0)]
+        dE = dC(sigma(v[-1]), sol) * dsigma(v[-1])
+        Wgrad = [self.batch_tensordot(dE, sigma(v[-2]))]
         bgrad = [dE]
 
         for k in range (1, self.nLayers):
-            dE = dE.dot (self.wMat[-k]) * dsigma(v[-k-1])
-            Wgrad.append (np.tensordot (dE,sigma(v[-k-2]), axes=0))
+            dE = dE.dot(self.wMat[-k])
+            dE *= dsigma(v[-k-1])
+            Wgrad.append (self.batch_tensordot(dE,sigma(v[-k-2])))
             bgrad.append (dE)
         
         Wgrad.reverse()
@@ -81,7 +96,32 @@ class Brain:
         return Wgrad, bgrad
 
 
-    def save_to_json (self, file_name = 'network2.json'):
+    def batch_tensordot (self, x, y):
+        result = np.empty((x.shape[0], x.shape[1], y.shape[1]))
+        for k, (xk, yk) in enumerate(zip(x, y)):
+            result[k] = np.tensordot(xk, yk, axes=0)
+        return result
+
+
+    def init_metrics (self):
+        metrics = {
+            'loss' : 0,
+            'accuracy' : 0,
+            'batch_loss' : [],
+            'update_ratio' : []
+        }
+        return metrics
+
+
+    def update_metrics (self, metrics, predict, lbl, gradW, gradb):
+        metrics['batch_loss'].append(C(sigma(predict[-1]), lbl))
+        metrics['loss'] += metrics['batch_loss'][-1]
+        metrics['update_ratio'].append(sum([dw.sum() + db.sum() for dw, db in zip(gradW,gradb)]) 
+                                              / sum([w.sum() + b.sum() for w,b in zip(self.wMat, self.bias)]))
+        
+
+
+    def save_to_json (self, file_name = '../saved_models/network3.json'):
         data = {"weights" : [w.tolist() for w in self.wMat],
                 "biases" : [b.tolist() for b in self.bias]}
         
@@ -90,8 +130,8 @@ class Brain:
         outf.close()
         
 
-#sigmoid function and its derivative
-#sigma = lambda x: np.arctan(x) / np.pi + 0.5
+#activation function and its derivative
+#sigma = lambda x:  np.arctan(x) / np.pi + 0.5
 #dsigma = lambda x: 1 / (1 + x*x) / np.pi
 
 sigma = lambda z: 1 / (1 + np.exp(-z))
@@ -107,9 +147,9 @@ C = lambda x,a: - np.sum (a * np.log(x) + (1 - a) * np.log(1 - x))
 #dC = lambda x,a: np.array ([(xi - zi) / (xi * (1 - xi)) for xi, zi in zip(x,a)]) 
 
 
-def test (network, data):
+def test (network, samples, labels):
     errors = 0
-    for image, sol in data:    
+    for image, sol in zip(samples, labels):    
         g = network.guess (image)
         if g - sol:
             errors += 1
@@ -127,85 +167,83 @@ def load_from_json (file_name):
         return Brain(weights, biases)
 
 
-def one_hot (numbers, dim):
-    L = len(numbers)
-    vec = np.zeros((np.size(numbers), dim))
+def plot_metrics (metrics, epoch_metrics, fig):
+    metrics['loss'].append(epoch_metrics['loss'])
+    metrics['batch_loss'] += epoch_metrics['batch_loss']
+    metrics['update_ratio'] = epoch_metrics['update_ratio']
 
-    for k in range(L):
-        vec[k][numbers[k]] = 1;
-    return vec
+    epochs = np.arange(len(metrics['loss']))
+    batches = np.arange(len(metrics['batch_loss']))
+    epoch_batches = np.arange(len(metrics['update_ratio']))
+   
+    fig.clf()
+    ax_loss = fig.add_subplot(223)
+    ax_batch = fig.add_subplot(211)
+    ax_update = fig.add_subplot(224)
 
+    ax_loss.plot(epochs, metrics['loss'])
+    ax_batch.plot(batches, metrics['batch_loss'])
+    ax_update.plot(epoch_batches, metrics['update_ratio'])
 
-def speaker (f):
-    def wrapper (*args,**kwargs):
-        print('Loading data...', end = '')
-        a = f(*args,**kwargs)
-        print('Done.')
-        return a
-    return wrapper
-
-
-@speaker
-def load_images (img_name, lbl_name, load_up_to = 'all', vectorize = 0):
-    img_file = open(img_name, 'rb')
-    lbl_file = open(lbl_name, 'rb')
-
-    img_file.seek(0) #getting to the beginning of the file
-    lbl_file.seek(8) #labels start from the 8-th byte of this file
-    magic_n = st.unpack('>4B', img_file.read(4)) #magic number
-
-    nImgs = st.unpack('>I',img_file.read(4))[0] #number of images
-    nRows = st.unpack('>I',img_file.read(4))[0] #number of rows
-    nCols = st.unpack('>I',img_file.read(4))[0] #number of columns
-    if load_up_to != 'all':
-        nImgs = int(load_up_to)
-
-    #array of images
-    images = np.zeros((nImgs,nRows*nCols))
-    images =  np.asarray(st.unpack('>'+'B'*nRows*nCols*nImgs,
-    img_file.read(nImgs*nRows*nCols))).reshape((nImgs,nRows*nCols)) / 255
-
-    #array of labels
-    labels = np.asarray(st.unpack('>'+str(nImgs) + 'B',lbl_file.read(nImgs))).reshape(nImgs)
-    if vectorize: 
-        labels = one_hot (labels, vectorize)
-
-    img_file.close()
-    lbl_file.close()
-    return list(zip(images, labels))
+    plt.draw()
+    plt.pause(0.001)
 
 
-def std_exec ():
-    #neural network layers
-    dims = [784, 100, 10]
-    #intializing weights and biases at random
+def init_weights (dims):
     weights, biases = [], []
     for i in range(len(dims)-1):
         weights.append(0.1 * np.random.randn(dims[i+1],dims[i]))
         biases.append(0.1 * np.random.randn(dims[i+1])) 
+    return weights, biases
 
-    network = Brain(weights,biases)
 
-    #loading datasets
-    training_files = ('mnist/data/train-images-idx3-ubyte','mnist/data/train-labels-idx1-ubyte') 
-    test_files = ('mnist/data/t10k-images-idx3-ubyte','mnist/data/t10k-labels-idx1-ubyte')
+def std_exec ():
+    # loading datasets
+    images, labels, test_imgs, test_lbls = load_all()
+    print('Finished loading data.')
     
-    training_data = load_images (*training_files, vectorize = 10)
-    test_data = load_images (*test_files)
+    # neural network layers
+    input_size = images[0].size
+    dims = [input_size, 100, 10]
+    weights, biases = init_weights(dims)
 
-    #training and testing
+    network = Brain(weights, biases)
+
+    # setting metrics 
+    metrics = {'loss' : [], 'batch_loss' : [], 'update_ratio' : []}
+    fig = plt.figure()
+    plt.ion()
+    plt.show()
+
+    # training and testing
     reg = 0 
-    for i in range(30):
+    for i in range(20):
+        # shuffling training data
+        training_data = np.concatenate([images, labels], axis=1) 
         shuffle (training_data)
-        cost = network.SGD_training (training_data, eta = 0.6)
-        errors = test (network, test_data)
+        images = training_data[:, :input_size]
+        labels = training_data[:, input_size:]
 
-        perc = (1 - errors / len(test_data)) * 100
-        print('Epoch {0} results: {1} mistakes, {2:.2f}% correct, training cost = {3:.6f}'
-                .format(i + 1, errors, perc, cost))
-        
-    network.save_to_json('network2.json')
+        epoch_metrics = network.SGD_training (images, labels, eta = 0.6)
+        plot_metrics(metrics, epoch_metrics, fig)
+        errors = test (network, test_imgs, test_lbls)
+
+        perc = (1 - errors / len(test_lbls)) * 100
+        print('Epoch {0} results: {1} mistakes, {2:.2f}% correct'
+                .format(i + 1, errors, perc))
+
+    plt.ioff()
+    network.save_to_json('../saved_models/network3.json')
 
 
 if __name__ == '__main__':
     std_exec()
+
+#nice idea, though not feasible with dense nets, worth trying with convnets though
+#if not i % 5 and i:
+#    new_mat = np.eye(dims[1]) + 0.001 * np.random.randn(dims[1], dims[1])
+#    new_bias = 0.001 * np.random.randn(dims[1])
+
+#    network.nLayers += 1
+#    network.wMat.insert(-1, new_mat)
+#    network.bias.insert(-1, new_bias)
