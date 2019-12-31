@@ -1,16 +1,15 @@
 import numpy as np
 import struct as st
-import random
+from random import shuffle 
+import json
+
 
 class Brain:
     def __init__ (self, weight_Mat, biases):
         self.nLayers = len(biases)
 
-        self.wMat = []
-        self.bias = []
-        for k in range(self.nLayers):
-            self.wMat.append(np.asarray(weight_Mat[k]))
-            self.bias.append(np.asarray(biases[k]))
+        self.wMat = weight_Mat 
+        self.bias = biases
 
             
     def read (self,v0):
@@ -29,20 +28,21 @@ class Brain:
         return np.argmax(x)
 
         
-    def train (self, data, gamma = 3.0, size_batch = 10):
+    def SGD_training (self, data, eta = 0.5, size_batch = 10, 
+            regularize = 0, gamma = 0.5):
         #initializing gradients
         avg_dW = [np.zeros(np.shape(it)) for it in self.wMat]
         avg_db = [np.zeros(len(it)) for it in self.bias]
 
         #training
-        for i in range(len(data)):
-            result = self.read (data[i][0])
-
+        len_data = len(data)
+        cost = 0
+        for i in range(len_data):
             #computing gradients
-            sol = np.zeros(10)
-            sol[data[i][1]] = 1.0
-            dW,db = gradErr(self.wMat,self.bias,result,sol,self.nLayers)
-            
+            result = self.read (data[i][0])
+            dW, db = self.gradErr (result, data[i][1]) 
+            cost += C(sigma(result[-1]), data[i][1])
+
             #adding to gradients' averages
             for j in range(self.nLayers):
                 avg_dW[j] += dW[j]
@@ -50,62 +50,66 @@ class Brain:
 
             if i % size_batch == 0 and i > 1:
                 for j in range(self.nLayers):
+                    #regularizing if requested
+                    if regularize == 1:
+                        self.wMat[j] -= eta * gamma / len_data * np.sign (self.wMat[j])
+                    if regularize == 2:
+                        self.wMat[j] *= 1 - eta * gamma / len_data 
+                    
                     #computing new weights and biases
-                    self.wMat[j] -= (gamma / size_batch) * avg_dW[j]
-                    self.bias[j] -= (gamma / size_batch) * avg_db[j]
+                    self.wMat[j] -= (eta / size_batch) * avg_dW[j]
+                    self.bias[j] -= (eta / size_batch) * avg_db[j]
 
                     avg_dW[j] = np.zeros(np.shape(self.wMat[j]))
-                    avg_db[j] = np.zeros(len(self.bias[j]))
+                    avg_db[j] = np.zeros(np.shape(self.bias[j]))
+        
+        return cost / len_data
        
 
-    def save_to_dat (self, file_name = '../saved_models/network.dat'):
-        outf = open (file_name, 'w')
+    def gradErr (self, v, sol):
+        dE = dC(sigma(v[-1]),sol) #* dsigma(v[-1])
+        Wgrad = [np.tensordot (dE,sigma(v[-2]), axes=0)]
+        bgrad = [dE]
 
-        for w,b in zip(self.wMat, self.bias):
-            sw = np.shape(w)
-            outf.write (str(sw[0]) + ' ' + str(sw[1]) + '\n')    
+        for k in range (1, self.nLayers):
+            dE = dE.dot (self.wMat[-k]) * dsigma(v[-k-1])
+            Wgrad.append (np.tensordot (dE,sigma(v[-k-2]), axes=0))
+            bgrad.append (dE)
+        
+        Wgrad.reverse()
+        bgrad.reverse()
+        return Wgrad, bgrad
 
-            for i in range(sw[0]):
-                for j in range(sw[1]):
-                    outf.write (str(w[i][j]) + ' ')
-                outf.write ('\n')
 
-            for i in range(sw[0]):
-                outf.write (str(b[i]) + ' ')
-            outf.write ('\n')
-
+    def save_to_json (self, file_name = 'network2.json'):
+        data = {"weights" : [w.tolist() for w in self.wMat],
+                "biases" : [b.tolist() for b in self.bias]}
+        
+        outf = open (file_name, 'w') 
+        json.dump(data, outf)
         outf.close()
         
 
 #sigmoid function and its derivative
-sigma = lambda x: np.arctan(x) / np.pi + 0.5
-dSigma = lambda x: 1 / (1 + x*x) / np.pi
-#sigma = lambda z: 1/(1 + np.exp(-z))
-#dSigma = lambda z: sigma(z) * (1 - sigma(z))
+#sigma = lambda x: np.arctan(x) / np.pi + 0.5
+#dsigma = lambda x: 1 / (1 + x*x) / np.pi
+
+sigma = lambda z: 1 / (1 + np.exp(-z))
+dsigma = lambda z: sigma(z) * (1 - sigma(z))
 
 #cost function derivative
-#C(x,a) = 1/2*(x-a)^2
-dC = lambda x,a: x-a 
+#C = lambda x,a: 1/2 * np.sum ((x - a) * (x - a))
+dC = lambda x,a: x - a 
 
-#gradient evaluator
-def gradErr (W,b,v,sol,l):
-    dE = dC(sigma(v[l]), sol) * dSigma(v[l])
-    Wgrad = [np.tensordot (dE,sigma(v[l-1]), axes=0)]
-    bgrad = [dE]
-    
-    for k in range(1,l):
-        dE = dE.dot (W[l-k]) * dSigma(v[l-k])
-        Wgrad.append (np.tensordot (dE,sigma(v[l-k-1]), axes=0))
-        bgrad.append (dE)
-
-    Wgrad.reverse ()
-    bgrad.reverse ()
-    return Wgrad, bgrad
+C = lambda x,a: - np.sum (a * np.log(x) + (1 - a) * np.log(1 - x))
+#do not use the following derivative for cross entropy, use dC above and comment
+#'*dsigma(v[-1])' in the gradErr function
+#dC = lambda x,a: np.array ([(xi - zi) / (xi * (1 - xi)) for xi, zi in zip(x,a)]) 
 
 
 def test (network, data):
     errors = 0
-    for image, sol in data:
+    for image, sol in data:    
         g = network.guess (image)
         if g - sol:
             errors += 1
@@ -113,70 +117,36 @@ def test (network, data):
     return errors
 
 
-def load_from_dat (file_name):
-    #reading from file
-    fin = open (file_name, 'r')
-    data = fin.read ()
-    fin.close()
-    L = len(data)
+def load_from_json (file_name):
+    with open(file_name, 'r') as fin:
+        data = json.load(fin)
 
-    #initializing lists
-    mlist = []
-    vlist = []
-    k = 0
-    while k < L:
-        #reading size
-        size = [0, 0]
-        for i in range(2):
-            size[i], k = build_number (data, k, L)            
-            size[i] = int(size[i])
+        weights = [np.array(w) for w in data["weights"]]
+        biases = [np.array(b) for b in data["biases"]]
 
-        mat = np.zeros(tuple(size))
-        vec = np.zeros(size[0])
-
-        #building matrix
-        for i in range(size[0]):
-            for j in range(size[1]):
-                mat[i][j], k = build_number (data, k, L)
-        
-        #building vector
-        for i in range(size[0]):
-            vec[i], k = build_number (data, k, L)
-        
-        mlist.append (mat)
-        vlist.append (vec)
-
-    return Brain (mlist, vlist)
+        return Brain(weights, biases)
 
 
-def build_number (data,k,L):
-    number = ''
-    while data[k] != ' ' and data[k] != '\n':
-        number += data[k]
-        k += 1
+def one_hot (numbers, dim):
+    L = len(numbers)
+    vec = np.zeros((np.size(numbers), dim))
 
-    #skipping spaces and newlines
-    while k < L and (data[k] == ' ' or data[k] == '\n'):
-        k += 1
-    
-    return float(number), k
-
-
+    for k in range(L):
+        vec[k][numbers[k]] = 1;
+    return vec
 
 
 def speaker (f):
     def wrapper (*args,**kwargs):
-        if f.__name__ == 'load_images':
-            print('Loading data...', end = '')
+        print('Loading data...', end = '')
         a = f(*args,**kwargs)
         print('Done.')
         return a
     return wrapper
 
 
-#NOTE: n = # of images to be put in the 3-tensor 'images'
 @speaker
-def load_images (img_name, lbl_name, n = 'all'):
+def load_images (img_name, lbl_name, load_up_to = 'all', vectorize = 0):
     img_file = open(img_name, 'rb')
     lbl_file = open(lbl_name, 'rb')
 
@@ -187,14 +157,18 @@ def load_images (img_name, lbl_name, n = 'all'):
     nImgs = st.unpack('>I',img_file.read(4))[0] #number of images
     nRows = st.unpack('>I',img_file.read(4))[0] #number of rows
     nCols = st.unpack('>I',img_file.read(4))[0] #number of columns
-    if n == 'all': n = nImgs
-    
+    if load_up_to != 'all':
+        nImgs = int(load_up_to)
+
     #array of images
-    images = np.zeros((n,nRows*nCols))
-    images =  np.asarray(st.unpack('>'+'B'*nRows*nCols*n,img_file.read(n*nRows*nCols))).reshape((n,nRows*nCols)) / 255
+    images = np.zeros((nImgs,nRows*nCols))
+    images =  np.asarray(st.unpack('>'+'B'*nRows*nCols*nImgs,
+    img_file.read(nImgs*nRows*nCols))).reshape((nImgs,nRows*nCols)) / 255
 
     #array of labels
-    labels = np.asarray(st.unpack('>'+str(n) + 'B',lbl_file.read(n))).reshape(n)
+    labels = np.asarray(st.unpack('>'+str(nImgs) + 'B',lbl_file.read(nImgs))).reshape(nImgs)
+    if vectorize: 
+        labels = one_hot (labels, vectorize)
 
     img_file.close()
     lbl_file.close()
@@ -202,32 +176,36 @@ def load_images (img_name, lbl_name, n = 'all'):
 
 
 def std_exec ():
-    training_files = ('../mnist/data/train-images-idx3-ubyte','../mnist/data/train-labels-idx1-ubyte') 
-    test_files = ('../mnist/data/t10k-images-idx3-ubyte','../mnist/data/t10k-labels-idx1-ubyte')
     #neural network layers
     dims = [784, 100, 10]
     #intializing weights and biases at random
-    weights, biases = [],[]
+    weights, biases = [], []
     for i in range(len(dims)-1):
-        weights.append(2*np.random.rand(dims[i+1],dims[i])-1)
-        biases.append(2*np.random.rand(dims[i+1])-1) 
+        weights.append(0.1 * np.random.randn(dims[i+1],dims[i]))
+        biases.append(0.1 * np.random.randn(dims[i+1])) 
 
     network = Brain(weights,biases)
 
     #loading datasets
-    training_data = load_images (*training_files)
+    training_files = ('mnist/data/train-images-idx3-ubyte','mnist/data/train-labels-idx1-ubyte') 
+    test_files = ('mnist/data/t10k-images-idx3-ubyte','mnist/data/t10k-labels-idx1-ubyte')
+    
+    training_data = load_images (*training_files, vectorize = 10)
     test_data = load_images (*test_files)
 
-
     #training and testing
+    reg = 0 
     for i in range(30):
-        random.shuffle(training_data)
-        network.train(training_data)
-        errors = test(network, test_data)
-        perc = (1-errors/len(test_data))*100
-        print(i+1, 'results:\t', errors,'mistakes, ', perc, '% correct')
+        shuffle (training_data)
+        cost = network.SGD_training (training_data, eta = 0.6)
+        errors = test (network, test_data)
 
-    network.save_to_dat()
+        perc = (1 - errors / len(test_data)) * 100
+        print('Epoch {0} results: {1} mistakes, {2:.2f}% correct, training cost = {3:.6f}'
+                .format(i + 1, errors, perc, cost))
+        
+    network.save_to_json('network2.json')
+
 
 if __name__ == '__main__':
     std_exec()
