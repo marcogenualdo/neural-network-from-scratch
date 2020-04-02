@@ -1,1 +1,6 @@
 *.pyc
+
+# latex 
+readme_assets/readme.aux
+readme_assets/readme.log
+readme_assets/readme.synctex.gz
